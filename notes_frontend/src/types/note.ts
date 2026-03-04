@@ -44,6 +44,8 @@ export interface AuthState {
   email: string | null;
   /** Auth token for API calls */
   token: string | null;
+  /** User's username if authenticated */
+  username: string | null;
 }
 
 // PUBLIC_INTERFACE

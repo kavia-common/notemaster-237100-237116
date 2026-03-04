@@ -175,6 +175,71 @@ export function useNotes() {
       return filter.sortDirection === 'desc' ? -comparison : comparison;
     });
 
+  /**
+   * Merge notes pulled from the server into local state.
+   * For each pulled note: if it exists locally, update only if server version is newer.
+   * If it doesn't exist locally, add it.
+   * @param pulledNotes - Notes pulled from the server
+   * @param pulledTags - Tags pulled from the server
+   */
+  const mergeFromServer = useCallback(
+    (pulledNotes: Note[], pulledTags: Tag[]) => {
+      // Merge tags first
+      setTags((prevTags) => {
+        const tagMap = new Map(prevTags.map((t) => [t.id, t]));
+        // Also check by name to avoid duplicates
+        const nameMap = new Map(prevTags.map((t) => [t.name.toLowerCase(), t]));
+        for (const pt of pulledTags) {
+          if (!tagMap.has(pt.id) && !nameMap.has(pt.name.toLowerCase())) {
+            tagMap.set(pt.id, pt);
+            nameMap.set(pt.name.toLowerCase(), pt);
+            storage.saveTag(pt);
+          }
+        }
+        return Array.from(tagMap.values());
+      });
+
+      // Merge notes
+      setNotes((prevNotes) => {
+        const noteMap = new Map(prevNotes.map((n) => [n.id, n]));
+        for (const pn of pulledNotes) {
+          const existing = noteMap.get(pn.id);
+          if (existing) {
+            // Only update if server version is newer
+            if (new Date(pn.updatedAt) > new Date(existing.updatedAt)) {
+              const merged = { ...existing, ...pn, synced: true };
+              noteMap.set(pn.id, merged);
+              storage.saveNote(merged);
+            }
+          } else {
+            // New note from server
+            const newNote = { ...pn, synced: true };
+            noteMap.set(pn.id, newNote);
+            storage.saveNote(newNote);
+          }
+        }
+        return Array.from(noteMap.values());
+      });
+    },
+    []
+  );
+
+  /**
+   * Mark all notes as synced after a successful push.
+   */
+  const markAllSynced = useCallback(() => {
+    setNotes((prevNotes) =>
+      prevNotes.map((n) => {
+        if (!n.synced) {
+          const synced = { ...n, synced: true };
+          storage.saveNote(synced);
+          return synced;
+        }
+        return n;
+      })
+    );
+  }, []);
+
   return {
     notes: filteredNotes,
     allNotes: notes,
@@ -191,5 +256,7 @@ export function useNotes() {
     createTag,
     removeTag,
     toggleNoteTag,
+    mergeFromServer,
+    markAllSynced,
   };
 }

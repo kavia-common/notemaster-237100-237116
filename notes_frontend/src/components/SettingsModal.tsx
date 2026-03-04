@@ -3,10 +3,11 @@
 /**
  * SettingsModal Component - Modal for app settings, tag management, and account/sync UI.
  * Features retro-themed styling with pixel borders.
+ * Integrates with backend auth (register/login) and sync (push/pull) endpoints.
  */
 
-import React, { useState } from 'react';
-import { Tag, AuthState } from '@/types/note';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Tag, AuthState, SyncStatus } from '@/types/note';
 import * as syncService from '@/services/syncService';
 
 interface SettingsModalProps {
@@ -22,6 +23,14 @@ interface SettingsModalProps {
   onCreateTag: (name: string, color: string) => void;
   /** Whether the app is online */
   isOnline: boolean;
+  /** Callback to trigger sync from parent */
+  onSyncRequest?: () => Promise<void>;
+  /** Current sync status from parent */
+  syncStatus?: SyncStatus;
+  /** Current auth state from parent */
+  authState?: AuthState;
+  /** Callback to update auth state in parent */
+  onAuthChange?: (state: AuthState) => void;
 }
 
 /** Predefined retro tag colors */
@@ -34,6 +43,8 @@ const TAG_COLORS = [
 /**
  * SettingsModal provides UI for managing tags, account authentication,
  * and sync settings. Includes login/register forms for optional sync.
+ * Wired to backend /auth/register, /auth/login endpoints with proper
+ * request shapes (username, email, password).
  */
 export default function SettingsModal({
   isOpen,
@@ -42,23 +53,52 @@ export default function SettingsModal({
   onDeleteTag,
   onCreateTag,
   isOnline,
+  onSyncRequest,
+  syncStatus = 'idle',
+  authState: externalAuth,
+  onAuthChange,
 }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<'tags' | 'account'>('tags');
-  const [auth, setAuth] = useState<AuthState>({
+
+  // Use external auth state if provided, otherwise manage internally
+  const [internalAuth, setInternalAuth] = useState<AuthState>({
     isAuthenticated: false,
     email: null,
     token: null,
+    username: null,
   });
+  const auth = externalAuth || internalAuth;
+
   const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const [isRegistering, setIsRegistering] = useState(false);
   const [newTagName, setNewTagName] = useState('');
   const [newTagColor, setNewTagColor] = useState(TAG_COLORS[0]);
 
+  // Load persisted auth state on mount
+  useEffect(() => {
+    if (!externalAuth) {
+      const persisted = syncService.loadAuthState();
+      if (persisted.isAuthenticated) {
+        setInternalAuth(persisted);
+      }
+    }
+  }, [externalAuth]);
+
+  /** Update auth state in both internal and external (parent) state */
+  const updateAuth = useCallback((state: AuthState) => {
+    setInternalAuth(state);
+    if (onAuthChange) {
+      onAuthChange(state);
+    }
+  }, [onAuthChange]);
+
   if (!isOpen) return null;
 
-  /** Handle login attempt */
+  /** Handle login attempt - backend expects { username, password } */
   const handleLogin = async () => {
     if (!email || !password) {
       setAuthError('Please fill in all fields');
@@ -66,10 +106,11 @@ export default function SettingsModal({
     }
     setAuthLoading(true);
     setAuthError('');
+    // Backend /auth/login takes { username, password }; username can be email
     const result = await syncService.login(email, password);
     setAuthLoading(false);
     if (result.isAuthenticated) {
-      setAuth(result);
+      updateAuth(result);
       setEmail('');
       setPassword('');
     } else {
@@ -77,10 +118,14 @@ export default function SettingsModal({
     }
   };
 
-  /** Handle register attempt */
+  /** Handle register attempt - backend expects { username, email, password } */
   const handleRegister = async () => {
-    if (!email || !password) {
+    if (!username || !email || !password) {
       setAuthError('Please fill in all fields');
+      return;
+    }
+    if (username.length < 3) {
+      setAuthError('Username must be at least 3 characters');
       return;
     }
     if (password.length < 6) {
@@ -89,20 +134,29 @@ export default function SettingsModal({
     }
     setAuthLoading(true);
     setAuthError('');
-    const result = await syncService.register(email, password);
+    const result = await syncService.register(username, email, password);
     setAuthLoading(false);
     if (result.isAuthenticated) {
-      setAuth(result);
+      updateAuth(result);
       setEmail('');
+      setUsername('');
       setPassword('');
+      setIsRegistering(false);
     } else {
-      setAuthError('Registration failed. Try again later.');
+      setAuthError('Registration failed. Username or email may already be taken.');
     }
   };
 
   /** Handle logout */
   const handleLogout = () => {
-    setAuth(syncService.logout());
+    updateAuth(syncService.logout());
+  };
+
+  /** Handle manual sync trigger */
+  const handleSync = async () => {
+    if (onSyncRequest) {
+      await onSyncRequest();
+    }
   };
 
   /** Handle creating a new tag from settings */
@@ -265,8 +319,39 @@ export default function SettingsModal({
                 <div>
                   <div className="p-3 bg-[var(--color-tag-bg)] border-2 border-[var(--color-border)] mb-4">
                     <p className="text-sm font-bold">✅ Signed in as:</p>
-                    <p className="text-sm">{auth.email}</p>
+                    <p className="text-sm">{auth.username || auth.email}</p>
+                    {auth.email && auth.username && (
+                      <p className="text-xs text-[var(--color-text-muted)]">{auth.email}</p>
+                    )}
                   </div>
+
+                  {/* Sync controls */}
+                  {onSyncRequest && (
+                    <div className="mb-4">
+                      <button
+                        className={`retro-btn w-full px-4 py-2 text-sm text-white ${
+                          syncStatus === 'syncing'
+                            ? 'bg-[var(--color-text-muted)] cursor-wait'
+                            : 'bg-[var(--color-accent)]'
+                        }`}
+                        onClick={handleSync}
+                        disabled={syncStatus === 'syncing' || !isOnline}
+                      >
+                        {syncStatus === 'syncing' ? '🔄 Syncing...' : '🔄 Sync Now'}
+                      </button>
+                      {syncStatus === 'error' && (
+                        <p className="text-xs text-[var(--color-error)] mt-1">
+                          Sync failed. Try again later.
+                        </p>
+                      )}
+                      {!isOnline && (
+                        <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                          Sync unavailable while offline.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
                   <button
                     className="retro-btn w-full px-4 py-2 bg-[var(--color-error)] text-white text-sm"
                     onClick={handleLogout}
@@ -287,9 +372,22 @@ export default function SettingsModal({
                   )}
 
                   <div className="space-y-3">
+                    {/* Username field - shown for register, also usable for login */}
+                    {isRegistering && (
+                      <input
+                        type="text"
+                        placeholder="Username (min 3 characters)"
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        className="retro-input w-full px-3 py-2 text-sm"
+                        aria-label="Username"
+                        minLength={3}
+                        maxLength={100}
+                      />
+                    )}
                     <input
                       type="email"
-                      placeholder="Email address"
+                      placeholder={isRegistering ? 'Email address' : 'Email or username'}
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       className="retro-input w-full px-3 py-2 text-sm"
@@ -300,24 +398,60 @@ export default function SettingsModal({
                       placeholder="Password"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          if (isRegistering) {
+                            handleRegister();
+                          } else {
+                            handleLogin();
+                          }
+                        }
+                      }}
                       className="retro-input w-full px-3 py-2 text-sm"
                       aria-label="Password"
                     />
                     <div className="flex gap-2">
-                      <button
-                        className="retro-btn flex-1 px-4 py-2 bg-[var(--color-accent)] text-white text-sm"
-                        onClick={handleLogin}
-                        disabled={authLoading}
-                      >
-                        {authLoading ? '...' : 'Sign In'}
-                      </button>
-                      <button
-                        className="retro-btn flex-1 px-4 py-2 bg-[var(--color-secondary)] text-white text-sm"
-                        onClick={handleRegister}
-                        disabled={authLoading}
-                      >
-                        {authLoading ? '...' : 'Register'}
-                      </button>
+                      {isRegistering ? (
+                        <>
+                          <button
+                            className="retro-btn flex-1 px-4 py-2 bg-[var(--color-secondary)] text-white text-sm"
+                            onClick={handleRegister}
+                            disabled={authLoading}
+                          >
+                            {authLoading ? '...' : 'Create Account'}
+                          </button>
+                          <button
+                            className="retro-btn flex-1 px-4 py-2 bg-[var(--color-surface)] text-sm"
+                            onClick={() => {
+                              setIsRegistering(false);
+                              setAuthError('');
+                            }}
+                            disabled={authLoading}
+                          >
+                            Back to Login
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            className="retro-btn flex-1 px-4 py-2 bg-[var(--color-accent)] text-white text-sm"
+                            onClick={handleLogin}
+                            disabled={authLoading}
+                          >
+                            {authLoading ? '...' : 'Sign In'}
+                          </button>
+                          <button
+                            className="retro-btn flex-1 px-4 py-2 bg-[var(--color-secondary)] text-white text-sm"
+                            onClick={() => {
+                              setIsRegistering(true);
+                              setAuthError('');
+                            }}
+                            disabled={authLoading}
+                          >
+                            Register
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
 
